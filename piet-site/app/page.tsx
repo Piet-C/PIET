@@ -96,11 +96,17 @@ export default function Home() {
   const [isShuffled, setIsShuffled] = useState(false)
   const [shuffleSeed, setShuffleSeed] = useState(0)
   const [isShuffleAnimating, setIsShuffleAnimating] = useState(false)
+  const [showContact, setShowContact] = useState(false)
+  const [contactName, setContactName] = useState("")
+  const [contactEmail, setContactEmail] = useState("")
+  const [contactMessage, setContactMessage] = useState("")
+  const [isSending, setIsSending] = useState(false)
 
   const overlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const statusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchStartXRef = useRef<number | null>(null)
   const lastScrollYRef = useRef(0)
+  const imageMetaCacheRef = useRef<Record<string, { width: number; height: number }>>({})
 
   const previewUrl = useMemo(() => {
     if (!selectedFile) return ""
@@ -224,28 +230,48 @@ export default function Home() {
     statusTimeoutRef.current = setTimeout(() => setStatusMessage(""), 2200)
   }
 
-    async function loadPhotos() {
-  const { data, error } = await supabase
-    .from("photos")
-    .select("*")
-    .order("created_at", { ascending: false })
+  async function readImageSize(url: string) {
+    const cached = imageMetaCacheRef.current[url]
+    if (cached) return cached
 
-  if (error) {
-    console.error("Supabase loadPhotos error:", error)
-    return [] as PhotoWithMeta[]
+    const size = await new Promise<{ width: number; height: number }>((resolve) => {
+      const img = new window.Image()
+      img.onload = () => resolve({ width: img.naturalWidth || 1200, height: img.naturalHeight || 900 })
+      img.onerror = () => resolve({ width: 1200, height: 900 })
+      img.src = url
+    })
+
+    imageMetaCacheRef.current[url] = size
+    return size
   }
 
-  const rows = (data ?? []) as PhotoRow[]
+  async function loadPhotos() {
+    const { data, error } = await supabase
+      .from("photos")
+      .select("*")
+      .order("created_at", { ascending: false })
 
-  const fastRows: PhotoWithMeta[] = rows.map((photo, index) => ({
-    ...photo,
-    width: index % 5 === 0 ? 1600 : index % 3 === 0 ? 900 : 1200,
-    height: index % 4 === 0 ? 1600 : 900,
-  }))
+    if (error) {
+      console.error("Supabase loadPhotos error:", error)
+      return [] as PhotoWithMeta[]
+    }
 
-  setPhotos(fastRows)
-  return fastRows
-}
+    const rows = (data ?? []) as PhotoRow[]
+    const withMeta = await Promise.all(
+      rows.map(async (photo) => {
+        const meta = await readImageSize(photo.image_url)
+        return {
+          ...photo,
+          width: meta.width,
+          height: meta.height,
+        }
+      })
+    )
+
+    setPhotos(withMeta)
+    return withMeta
+  }
+
   function toggleUploadLabel(label: string) {
     setSelectedUploadLabels((current) =>
       current.includes(label)
@@ -368,6 +394,41 @@ export default function Home() {
     setTitleInput("")
     await loadPhotos()
     showStatus("Photo uploaded")
+  }
+
+  async function submitContact() {
+    if (!contactMessage.trim()) {
+      alert("Please write a message")
+      return
+    }
+
+    setIsSending(true)
+
+    const response = await fetch("https://formspree.io/f/mgonzopr", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        name: contactName.trim(),
+        email: contactEmail.trim(),
+        message: contactMessage.trim(),
+      }),
+    })
+
+    setIsSending(false)
+
+    if (!response.ok) {
+      alert("Message could not be sent")
+      return
+    }
+
+    setContactName("")
+    setContactEmail("")
+    setContactMessage("")
+    setShowContact(false)
+    showStatus("Message sent")
   }
 
   function openEditPanel(photo: PhotoRow) {
@@ -513,6 +574,13 @@ export default function Home() {
               Shuffle
             </button>
 
+            <button
+              onClick={() => setShowContact(true)}
+              className="shrink-0 text-[10px] uppercase tracking-[0.24em] text-white/40 transition hover:text-white/80"
+            >
+              Contact
+            </button>
+
             {(selectedCountry || selectedSubjects.length > 0) && (
               <button
                 onClick={clearFilters}
@@ -532,6 +600,12 @@ export default function Home() {
                   className={`text-[10px] uppercase tracking-[0.24em] ${isShuffled ? "text-white" : "text-white/40"}`}
                 >
                   Shuffle
+                </button>
+                <button
+                  onClick={() => setShowContact(true)}
+                  className="text-[10px] uppercase tracking-[0.24em] text-white/40"
+                >
+                  Contact
                 </button>
                 {(selectedCountry || selectedSubjects.length > 0) && (
                   <button
@@ -1044,6 +1118,72 @@ export default function Home() {
                     </div>
                   </>
                 )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+          {showContact && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4"
+          onClick={() => setShowContact(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-white/10 bg-black p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h2 className="text-base font-medium text-white">Contact</h2>
+              <button
+                type="button"
+                onClick={() => setShowContact(false)}
+                className="text-sm text-white/50 hover:text-white/80"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <input
+                type="text"
+                placeholder="Name (optional)"
+                value={contactName}
+                onChange={(e) => setContactName(e.target.value)}
+                className="w-full rounded-xl border border-white/20 bg-black px-3 py-2 text-white outline-none"
+              />
+
+              <input
+                type="email"
+                placeholder="Email (optional)"
+                value={contactEmail}
+                onChange={(e) => setContactEmail(e.target.value)}
+                className="w-full rounded-xl border border-white/20 bg-black px-3 py-2 text-white outline-none"
+              />
+
+              <textarea
+                placeholder="Your message"
+                value={contactMessage}
+                onChange={(e) => setContactMessage(e.target.value)}
+                className="h-32 w-full rounded-xl border border-white/20 bg-black px-3 py-2 text-white outline-none"
+              />
+
+              <div className="flex items-center justify-between gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowContact(false)}
+                  className="text-sm text-white/50 hover:text-white/80"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="button"
+                  onClick={submitContact}
+                  disabled={isSending}
+                  className="rounded-full bg-white px-5 py-2 text-black disabled:opacity-50"
+                >
+                  {isSending ? "Sending..." : "Send"}
+                </button>
               </div>
             </div>
           </div>
