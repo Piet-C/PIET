@@ -100,8 +100,7 @@ export default function Home() {
   const statusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchStartXRef = useRef<number | null>(null)
   const lastScrollYRef = useRef(0)
-  const imageMetaCacheRef = useRef<Record<string, { width: number; height: number }>>({})
-
+  
   const previewUrl = useMemo(() => {
     if (!selectedFile) return ""
     return URL.createObjectURL(selectedFile)
@@ -218,21 +217,6 @@ export default function Home() {
     statusTimeoutRef.current = setTimeout(() => setStatusMessage(""), 2200)
   }
 
-  async function readImageSize(url: string) {
-    const cached = imageMetaCacheRef.current[url]
-    if (cached) return cached
-
-    const size = await new Promise<{ width: number; height: number }>((resolve) => {
-      const img = new window.Image()
-      img.onload = () => resolve({ width: img.naturalWidth || 1200, height: img.naturalHeight || 900 })
-      img.onerror = () => resolve({ width: 1200, height: 900 })
-      img.src = url
-    })
-
-    imageMetaCacheRef.current[url] = size
-    return size
-  }
-
   async function loadPhotos() {
     const { data, error } = await supabase
       .from("photos")
@@ -245,19 +229,15 @@ export default function Home() {
     }
 
     const rows = (data ?? []) as PhotoRow[]
-    const withMeta = await Promise.all(
-      rows.map(async (photo) => {
-        const meta = await readImageSize(photo.image_url)
-        return {
-          ...photo,
-          width: meta.width,
-          height: meta.height,
-        }
-      })
-    )
 
-    setPhotos(withMeta)
-    return withMeta
+    const fastRows: PhotoWithMeta[] = rows.map((photo, index) => ({
+      ...photo,
+      width: index % 5 === 0 ? 1600 : index % 3 === 0 ? 900 : 1200,
+      height: index % 4 === 0 ? 1600 : 900,
+    }))
+
+    setPhotos(fastRows)
+    return fastRows
   }
 
   function toggleUploadLabel(label: string) {
@@ -797,7 +777,9 @@ export default function Home() {
                         src={photo.image_url}
                         alt={photo.title}
                         className="h-full w-full object-cover"
-                        loading="lazy"
+                        loading={index < 4 ? "eager" : "lazy"}
+                        decoding="async"
+                        fetchPriority={index < 2 ? "high" : "auto"}
                       />
                     </div>
                   </div>
