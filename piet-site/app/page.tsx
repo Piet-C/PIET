@@ -95,12 +95,14 @@ export default function Home() {
   const [headerFaded, setHeaderFaded] = useState(false)
   const [isShuffled, setIsShuffled] = useState(false)
   const [shuffleSeed, setShuffleSeed] = useState(0)
-  
+  const [isShuffleAnimating, setIsShuffleAnimating] = useState(false)
+
   const overlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const statusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchStartXRef = useRef<number | null>(null)
   const lastScrollYRef = useRef(0)
-  
+  const imageMetaCacheRef = useRef<Record<string, { width: number; height: number }>>({})
+
   const previewUrl = useMemo(() => {
     if (!selectedFile) return ""
     return URL.createObjectURL(selectedFile)
@@ -183,6 +185,12 @@ export default function Home() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!isShuffleAnimating) return
+    const timeout = setTimeout(() => setIsShuffleAnimating(false), 520)
+    return () => clearTimeout(timeout)
+  }, [isShuffleAnimating])
+
   const allLabels = useMemo(() => {
     const values = photos.flatMap((photo) => parseLabels(photo.labels))
     return Array.from(new Set(values)).sort()
@@ -217,6 +225,21 @@ export default function Home() {
     statusTimeoutRef.current = setTimeout(() => setStatusMessage(""), 2200)
   }
 
+  async function readImageSize(url: string) {
+    const cached = imageMetaCacheRef.current[url]
+    if (cached) return cached
+
+    const size = await new Promise<{ width: number; height: number }>((resolve) => {
+      const img = new window.Image()
+      img.onload = () => resolve({ width: img.naturalWidth || 1200, height: img.naturalHeight || 900 })
+      img.onerror = () => resolve({ width: 1200, height: 900 })
+      img.src = url
+    })
+
+    imageMetaCacheRef.current[url] = size
+    return size
+  }
+
   async function loadPhotos() {
     const { data, error } = await supabase
       .from("photos")
@@ -229,15 +252,19 @@ export default function Home() {
     }
 
     const rows = (data ?? []) as PhotoRow[]
+    const withMeta = await Promise.all(
+      rows.map(async (photo) => {
+        const meta = await readImageSize(photo.image_url)
+        return {
+          ...photo,
+          width: meta.width,
+          height: meta.height,
+        }
+      })
+    )
 
-    const fastRows: PhotoWithMeta[] = rows.map((photo, index) => ({
-      ...photo,
-      width: index % 5 === 0 ? 1600 : index % 3 === 0 ? 900 : 1200,
-      height: index % 4 === 0 ? 1600 : 900,
-    }))
-
-    setPhotos(fastRows)
-    return fastRows
+    setPhotos(withMeta)
+    return withMeta
   }
 
   function toggleUploadLabel(label: string) {
@@ -262,11 +289,11 @@ export default function Home() {
   }
 
   function toggleShuffle() {
-    setIsShuffled((current) => {
-      if (current) return false
+    setIsShuffleAnimating(true)
+    window.setTimeout(() => {
       setShuffleSeed(Date.now())
-      return true
-    })
+      setIsShuffled((current) => !current)
+    }, 110)
   }
 
   function revealOverlayInfo() {
@@ -581,6 +608,12 @@ export default function Home() {
         </div>
       </div>
 
+      {statusMessage && (
+        <div className="fixed bottom-4 left-1/2 z-[70] -translate-x-1/2 rounded-full border border-white/10 bg-black/70 px-4 py-2 text-sm text-white backdrop-blur-xl">
+          {statusMessage}
+        </div>
+      )}
+
       <div className="px-2 pt-20 pb-3 sm:px-3 lg:px-4">
         {isAdminMode && (
           <div className="mb-8 max-w-5xl rounded-3xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm sm:p-5">
@@ -760,8 +793,14 @@ export default function Home() {
             return (
               <div
                 key={photo.id}
-                className={`relative overflow-hidden bg-black ${roundingClass} ${colSpanClass}`}
-                style={{ gridRow: `span ${rowSpan} / span ${rowSpan}` }}
+                className={`relative overflow-hidden bg-black transition-all duration-500 ease-out ${roundingClass} ${colSpanClass} ${isShuffleAnimating ? "opacity-45" : "opacity-100"}`}
+                style={{
+                  gridRow: `span ${rowSpan} / span ${rowSpan}`,
+                  transform: isShuffleAnimating
+                    ? `translateY(${((index % 5) - 2) * 10}px) scale(0.96)`
+                    : "translateY(0px) scale(1)",
+                  transitionDelay: isShuffleAnimating ? `${(index % 8) * 18}ms` : "0ms",
+                }}
               >
                 <button
                   type="button"
@@ -777,9 +816,7 @@ export default function Home() {
                         src={photo.image_url}
                         alt={photo.title}
                         className="h-full w-full object-cover"
-                        loading={index < 4 ? "eager" : "lazy"}
-                        decoding="async"
-                        fetchPriority={index < 2 ? "high" : "auto"}
+                        loading="lazy"
                       />
                     </div>
                   </div>
@@ -793,6 +830,7 @@ export default function Home() {
       {activePhoto && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/92 p-4"
+          onMouseMove={revealOverlayInfo}
           onTouchStart={(e) => {
             if (isTouchDevice) {
               touchStartXRef.current = e.touches[0]?.clientX ?? null
@@ -811,17 +849,18 @@ export default function Home() {
             touchStartXRef.current = null
           }}
           onClick={() => {
-            if (isTouchDevice && !editingPhotoId) {
-              setShowOverlayInfo((current) => !current)
-            } else {
-              closeEditPanel()
-              setActivePhoto(null)
-            }
+            closeEditPanel()
+            setActivePhoto(null)
           }}
         >
           <div
             className="group relative flex max-h-[95vh] max-w-[92vw] items-center justify-center"
-            onClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation()
+              if (isTouchDevice && !editingPhotoId) {
+                setShowOverlayInfo((current) => !current)
+              }
+            }}
           >
             <button
               type="button"
@@ -871,6 +910,7 @@ export default function Home() {
             >
               <div
                 className="mx-auto max-w-md rounded-[16px] border border-white/10 bg-black/30 p-2.5 shadow-2xl backdrop-blur-xl"
+                onClick={(e) => e.stopPropagation()}
                 onMouseEnter={() => {
                   setShowOverlayInfo(true)
                   if (overlayTimeoutRef.current) clearTimeout(overlayTimeoutRef.current)
@@ -989,7 +1029,10 @@ export default function Home() {
                       {isAdminMode && (
                         <button
                           type="button"
-                          onClick={() => openEditPanel(activePhoto)}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            openEditPanel(activePhoto)
+                          }}
                           className="rounded-full border border-white/20 bg-white/5 px-3 py-1.5 text-xs text-white transition hover:bg-white hover:text-black"
                         >
                           Edit photo
@@ -1002,7 +1045,8 @@ export default function Home() {
                         <button
                           key={label}
                           type="button"
-                          onClick={() => {
+                          onClick={(e) => {
+                            e.stopPropagation()
                             if (COUNTRY_LABELS.includes(label as (typeof COUNTRY_LABELS)[number])) {
                               setSelectedCountry(label)
                               setSelectedSubjects([])
