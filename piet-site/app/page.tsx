@@ -106,7 +106,6 @@ export default function Home() {
   const statusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchStartXRef = useRef<number | null>(null)
   const lastScrollYRef = useRef(0)
-  const imageMetaCacheRef = useRef<Record<string, { width: number; height: number }>>({})
 
   const previewUrl = useMemo(() => {
     if (!selectedFile) return ""
@@ -230,47 +229,28 @@ export default function Home() {
     statusTimeoutRef.current = setTimeout(() => setStatusMessage(""), 2200)
   }
 
-  async function readImageSize(url: string) {
-    const cached = imageMetaCacheRef.current[url]
-    if (cached) return cached
-
-    const size = await new Promise<{ width: number; height: number }>((resolve) => {
-      const img = new window.Image()
-      img.onload = () => resolve({ width: img.naturalWidth || 1200, height: img.naturalHeight || 900 })
-      img.onerror = () => resolve({ width: 1200, height: 900 })
-      img.src = url
-    })
-
-    imageMetaCacheRef.current[url] = size
-    return size
-  }
-
   async function loadPhotos() {
-    const { data, error } = await supabase
-      .from("photos")
-      .select("*")
-      .order("created_at", { ascending: false })
+  const { data, error } = await supabase
+    .from("photos")
+    .select("*")
+    .order("created_at", { ascending: false })
 
-    if (error) {
-      console.error("Supabase loadPhotos error:", error)
-      return [] as PhotoWithMeta[]
-    }
-
-    const rows = (data ?? []) as PhotoRow[]
-    const withMeta = await Promise.all(
-      rows.map(async (photo) => {
-        const meta = await readImageSize(photo.image_url)
-        return {
-          ...photo,
-          width: meta.width,
-          height: meta.height,
-        }
-      })
-    )
-
-    setPhotos(withMeta)
-    return withMeta
+  if (error) {
+    console.error("Supabase loadPhotos error:", error)
+    return [] as PhotoWithMeta[]
   }
+
+  const rows = (data ?? []) as PhotoRow[]
+
+  const fastRows: PhotoWithMeta[] = rows.map((photo, index) => ({
+    ...photo,
+    width: index % 5 === 0 ? 1600 : index % 3 === 0 ? 900 : 1200,
+    height: index % 4 === 0 ? 1600 : 900,
+  }))
+
+  setPhotos(fastRows)
+  return fastRows
+}
 
   function toggleUploadLabel(label: string) {
     setSelectedUploadLabels((current) =>
