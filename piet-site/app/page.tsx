@@ -266,13 +266,19 @@ export default function Home() {
     const { signedUrl, publicUrl } = await res.json()
 
     // Step 2: upload directly to R2
-    await fetch(signedUrl, {
-      method: "PUT",
-      headers: { "Content-Type": selectedFile.type },
-      body: selectedFile,
-    })
+const uploadRes = await fetch(signedUrl, {
+  method: "PUT",
+  headers: { "Content-Type": selectedFile.type },
+  body: selectedFile,
+})
+if (!uploadRes.ok) {
+  const text = await uploadRes.text()
+  alert("R2 upload failed: " + uploadRes.status + " " + text)
+  setIsUploading(false)
+  return
+}
 
-    // Step 3: save metadata to Neon
+// Step 3: save metadata to Neon
     const typedLabels = labelInput.split(",").map((l) => l.trim().toLowerCase()).filter(Boolean)
     const labels = JSON.stringify(Array.from(new Set([...selectedUploadLabels, ...typedLabels])))
 
