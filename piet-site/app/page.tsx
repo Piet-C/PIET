@@ -1,6 +1,8 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
+import Image from "next/image"
+import { isCountryLabel } from "@/lib/countries"
 
 type PhotoRow = {
   id: string
@@ -14,12 +16,6 @@ type PhotoWithMeta = PhotoRow & {
   width: number
   height: number
 }
-
-const COUNTRY_LABELS = [
-  "benin", "ghana", "togo", "ivory coast", "sierra leone", "liberia",
-  "guinea", "guinea-bissau", "gambia", "senegal", "burkina faso", "mali",
-  "niger", "nigeria", "cape verde", "mauritania",
-] as const
 
 function parseLabels(labels: PhotoRow["labels"]): string[] {
   if (Array.isArray(labels)) {
@@ -50,6 +46,11 @@ function shuffleArray<T>(items: T[]) {
   return copy
 }
 
+// Grid images only need to be ~1 cell wide. This tells next/image which size
+// to actually download (it serves 2x for retina automatically, so it stays sharp).
+const GRID_SIZES =
+  "(min-width:1280px) 20vw, (min-width:1024px) 25vw, (min-width:640px) 33vw, 50vw"
+
 export default function Home() {
   const [photos, setPhotos] = useState<PhotoWithMeta[]>([])
   const [selectedCountry, setSelectedCountry] = useState("")
@@ -68,6 +69,7 @@ export default function Home() {
   const [editLabelInput, setEditLabelInput] = useState("")
   const [isSavingEdit, setIsSavingEdit] = useState(false)
   const [isDeletingPhoto, setIsDeletingPhoto] = useState(false)
+  const [isReplacing, setIsReplacing] = useState(false)
   const [statusMessage, setStatusMessage] = useState("")
   const [isDraggingFile, setIsDraggingFile] = useState(false)
   const [headerVisible, setHeaderVisible] = useState(true)
@@ -80,11 +82,17 @@ export default function Home() {
   const [contactEmail, setContactEmail] = useState("")
   const [contactMessage, setContactMessage] = useState("")
   const [isSending, setIsSending] = useState(false)
+  const [showSubscribe, setShowSubscribe] = useState(false)
+  const [subscribeEmail, setSubscribeEmail] = useState("")
+  const [subscribeStatus, setSubscribeStatus] = useState<"idle" | "loading" | "success" | "error">("idle")
 
   const overlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const statusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchStartXRef = useRef<number | null>(null)
+  const touchStartYRef = useRef<number | null>(null)
+  const swipedRef = useRef(false)
   const lastScrollYRef = useRef(0)
+  const replaceInputRef = useRef<HTMLInputElement | null>(null)
 
   const previewUrl = useMemo(() => {
     if (!selectedFile) return ""
@@ -102,6 +110,27 @@ export default function Home() {
     const params = new URLSearchParams(window.location.search)
     setIsAdminMode(params.get("admin") === "true")
   }, [])
+
+  // Show the newsletter popup once per visitor (a few seconds after landing).
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    let seen = false
+    try { seen = localStorage.getItem("piet-newsletter-seen") === "1" } catch { seen = false }
+    if (seen) return
+    const t = setTimeout(() => {
+      setShowSubscribe(true)
+      try { localStorage.setItem("piet-newsletter-seen", "1") } catch {}
+    }, 2500)
+    return () => clearTimeout(t)
+  }, [])
+
+  // Lock background scroll whenever a full-screen layer is open (fixes the
+  // "page scrolls while I try to swipe" problem on mobile).
+  useEffect(() => {
+    const anyLayerOpen = !!activePhoto || showContact || showSubscribe
+    document.body.style.overflow = anyLayerOpen ? "hidden" : ""
+    return () => { document.body.style.overflow = "" }
+  }, [activePhoto, showContact, showSubscribe])
 
   useEffect(() => {
     function handleScroll() {
@@ -136,6 +165,7 @@ export default function Home() {
       window.removeEventListener("keydown", handleKeyDown)
       if (overlayTimeoutRef.current) clearTimeout(overlayTimeoutRef.current)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePhoto, isTouchDevice, editingPhotoId])
 
   useEffect(() => {
@@ -154,12 +184,12 @@ export default function Home() {
   }, [photos])
 
   const countryOptions = useMemo(
-    () => allLabels.filter((l) => COUNTRY_LABELS.includes(l as (typeof COUNTRY_LABELS)[number])),
+    () => allLabels.filter((l) => isCountryLabel(l)),
     [allLabels]
   )
 
   const subjectOptions = useMemo(
-    () => allLabels.filter((l) => !COUNTRY_LABELS.includes(l as (typeof COUNTRY_LABELS)[number])),
+    () => allLabels.filter((l) => !isCountryLabel(l)),
     [allLabels]
   )
 
@@ -183,15 +213,20 @@ export default function Home() {
   }
 
   async function loadPhotos() {
-    const res = await fetch("/api/photos")
-    const rows: PhotoRow[] = await res.json()
-    const withMeta: PhotoWithMeta[] = rows.map((photo, index) => ({
-      ...photo,
-      width: index % 5 === 0 ? 1600 : index % 3 === 0 ? 900 : 1200,
-      height: index % 4 === 0 ? 1600 : 900,
-    }))
-    setPhotos(withMeta)
-    return withMeta
+    try {
+      const res = await fetch("/api/photos")
+      const rows: PhotoRow[] = await res.json()
+      const withMeta: PhotoWithMeta[] = rows.map((photo, index) => ({
+        ...photo,
+        width: index % 5 === 0 ? 1600 : index % 3 === 0 ? 900 : 1200,
+        height: index % 4 === 0 ? 1600 : 900,
+      }))
+      setPhotos(withMeta)
+      return withMeta
+    } catch {
+      showStatus("Could not load photos")
+      return []
+    }
   }
 
   function toggleUploadLabel(label: string) {
@@ -256,64 +291,131 @@ export default function Home() {
   async function submitUpload() {
     if (!selectedFile) { alert("Please choose a photo first"); return }
     setIsUploading(true)
+    try {
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: selectedFile.name, contentType: selectedFile.type }),
+      })
+      const { signedUrl, publicUrl } = await res.json()
 
-    // Step 1: get a signed URL from our API
-    const res = await fetch("/api/upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fileName: selectedFile.name, contentType: selectedFile.type }),
-    })
-    const { signedUrl, publicUrl } = await res.json()
+      const uploadRes = await fetch(signedUrl, {
+        method: "PUT",
+        headers: { "Content-Type": selectedFile.type },
+        body: selectedFile,
+      })
+      if (!uploadRes.ok) {
+        const text = await uploadRes.text()
+        alert("R2 upload failed: " + uploadRes.status + " " + text)
+        setIsUploading(false)
+        return
+      }
 
-    // Step 2: upload directly to R2
-const uploadRes = await fetch(signedUrl, {
-  method: "PUT",
-  headers: { "Content-Type": selectedFile.type },
-  body: selectedFile,
-})
-if (!uploadRes.ok) {
-  const text = await uploadRes.text()
-  alert("R2 upload failed: " + uploadRes.status + " " + text)
-  setIsUploading(false)
-  return
-}
+      const typedLabels = labelInput.split(",").map((l) => l.trim().toLowerCase()).filter(Boolean)
+      const labels = JSON.stringify(Array.from(new Set([...selectedUploadLabels, ...typedLabels])))
 
-// Step 3: save metadata to Neon
-    const typedLabels = labelInput.split(",").map((l) => l.trim().toLowerCase()).filter(Boolean)
-    const labels = JSON.stringify(Array.from(new Set([...selectedUploadLabels, ...typedLabels])))
+      await fetch("/api/photos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: titleInput.trim() || titleFromFileName(selectedFile.name),
+          image_url: publicUrl,
+          labels,
+        }),
+      })
 
-    await fetch("/api/photos", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: titleInput.trim() || titleFromFileName(selectedFile.name),
-        image_url: publicUrl,
-        labels,
-      }),
-    })
+      setLabelInput("")
+      setSelectedUploadLabels([])
+      setSelectedFile(null)
+      setTitleInput("")
+      await loadPhotos()
+      showStatus("Photo uploaded")
+    } catch {
+      alert("Upload failed, please try again")
+    } finally {
+      setIsUploading(false)
+    }
+  }
 
-    setIsUploading(false)
-    setLabelInput("")
-    setSelectedUploadLabels([])
-    setSelectedFile(null)
-    setTitleInput("")
-    await loadPhotos()
-    showStatus("Photo uploaded")
+  async function replaceActivePhoto(file: File | null) {
+    if (!file || !activePhoto) return
+    setIsReplacing(true)
+    try {
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: file.name, contentType: file.type }),
+      })
+      const { signedUrl, publicUrl } = await res.json()
+
+      const uploadRes = await fetch(signedUrl, {
+        method: "PUT",
+        headers: { "Content-Type": file.type },
+        body: file,
+      })
+      if (!uploadRes.ok) {
+        alert("Upload failed: " + uploadRes.status)
+        setIsReplacing(false)
+        return
+      }
+
+      await fetch(`/api/photos/${activePhoto.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_url: publicUrl }),
+      })
+
+      const rows = await loadPhotos()
+      const refreshed = rows.find((p) => p.id === activePhoto.id) ?? null
+      if (refreshed) setActivePhoto(refreshed)
+      showStatus("Photo replaced")
+    } catch {
+      alert("Replace failed, please try again")
+    } finally {
+      setIsReplacing(false)
+      if (replaceInputRef.current) replaceInputRef.current.value = ""
+    }
   }
 
   async function submitContact() {
     if (!contactMessage.trim()) { alert("Please write a message"); return }
     setIsSending(true)
-    const response = await fetch("https://formspree.io/f/mgonzopr", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ name: contactName.trim(), email: contactEmail.trim(), message: contactMessage.trim() }),
-    })
-    setIsSending(false)
-    if (!response.ok) { alert("Message could not be sent"); return }
-    setContactName(""); setContactEmail(""); setContactMessage("")
-    setShowContact(false)
-    showStatus("Message sent")
+    try {
+      const response = await fetch("https://formspree.io/f/mgonzopr", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ name: contactName.trim(), email: contactEmail.trim(), message: contactMessage.trim() }),
+      })
+      if (!response.ok) { alert("Message could not be sent"); return }
+      setContactName(""); setContactEmail(""); setContactMessage("")
+      setShowContact(false)
+      showStatus("Message sent")
+    } catch {
+      alert("Message could not be sent")
+    } finally {
+      setIsSending(false)
+    }
+  }
+
+  async function submitSubscribe() {
+    const email = subscribeEmail.trim()
+    if (!email.includes("@") || !email.includes(".")) { setSubscribeStatus("error"); return }
+    setSubscribeStatus("loading")
+    try {
+      const res = await fetch("/api/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      })
+      setSubscribeStatus(res.ok ? "success" : "error")
+    } catch {
+      setSubscribeStatus("error")
+    }
+  }
+
+  function openSubscribe() {
+    setSubscribeStatus("idle")
+    setShowSubscribe(true)
   }
 
   function openEditPanel(photo: PhotoRow) {
@@ -334,20 +436,25 @@ if (!uploadRes.ok) {
   async function savePhotoEdits() {
     if (!activePhoto || !editingPhotoId) return
     setIsSavingEdit(true)
-    const cleanedLabels = JSON.stringify(Array.from(new Set(
-      editLabelInput.split(",").map((l) => l.trim().toLowerCase()).filter(Boolean)
-    )))
-    await fetch(`/api/photos/${editingPhotoId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: editTitleInput.trim() || activePhoto.title, labels: cleanedLabels }),
-    })
-    setIsSavingEdit(false)
-    const rows = await loadPhotos()
-    const refreshed = rows.find((p) => p.id === editingPhotoId) ?? null
-    if (refreshed) setActivePhoto(refreshed)
-    closeEditPanel()
-    showStatus("Changes saved")
+    try {
+      const cleanedLabels = JSON.stringify(Array.from(new Set(
+        editLabelInput.split(",").map((l) => l.trim().toLowerCase()).filter(Boolean)
+      )))
+      await fetch(`/api/photos/${editingPhotoId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: editTitleInput.trim() || activePhoto.title, labels: cleanedLabels }),
+      })
+      const rows = await loadPhotos()
+      const refreshed = rows.find((p) => p.id === editingPhotoId) ?? null
+      if (refreshed) setActivePhoto(refreshed)
+      closeEditPanel()
+      showStatus("Changes saved")
+    } catch {
+      alert("Could not save changes")
+    } finally {
+      setIsSavingEdit(false)
+    }
   }
 
   async function deleteActivePhoto() {
@@ -355,12 +462,43 @@ if (!uploadRes.ok) {
     const confirmed = window.confirm("Delete this photo?")
     if (!confirmed) return
     setIsDeletingPhoto(true)
-    await fetch(`/api/photos/${activePhoto.id}`, { method: "DELETE" })
-    setIsDeletingPhoto(false)
-    await loadPhotos()
-    closeEditPanel()
-    setActivePhoto(null)
-    showStatus("Photo deleted")
+    try {
+      await fetch(`/api/photos/${activePhoto.id}`, { method: "DELETE" })
+      await loadPhotos()
+      closeEditPanel()
+      setActivePhoto(null)
+      showStatus("Photo deleted")
+    } catch {
+      alert("Could not delete photo")
+    } finally {
+      setIsDeletingPhoto(false)
+    }
+  }
+
+  // One place to decide, on touch, whether a gesture was a swipe or a tap.
+  function handleOverlayTouchStart(e: React.TouchEvent) {
+    touchStartXRef.current = e.touches[0]?.clientX ?? null
+    touchStartYRef.current = e.touches[0]?.clientY ?? null
+    swipedRef.current = false
+  }
+
+  function handleOverlayTouchEnd(e: React.TouchEvent) {
+    if (editingPhotoId) return
+    const startX = touchStartXRef.current
+    const startY = touchStartYRef.current
+    const endX = e.changedTouches[0]?.clientX ?? null
+    const endY = e.changedTouches[0]?.clientY ?? null
+    touchStartXRef.current = null
+    touchStartYRef.current = null
+    if (startX === null || endX === null || startY === null || endY === null) return
+    const dx = endX - startX
+    const dy = endY - startY
+    // Horizontal swipe: navigate. Must be clearly sideways, not a scroll.
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      swipedRef.current = true
+      if (dx < 0) showNextPhoto()
+      else showPreviousPhoto()
+    }
   }
 
   return (
@@ -373,7 +511,7 @@ if (!uploadRes.ok) {
               <span className="shrink-0 text-[10px] uppercase tracking-[0.28em] text-white/30">Country</span>
               <button onClick={() => setSelectedCountry("")} className={`shrink-0 text-sm transition ${selectedCountry === "" ? "text-white" : "text-white/45 hover:text-white/80"}`}>All</button>
               {countryOptions.map((label) => (
-                <button key={label} onClick={() => setSelectedCountry((cur) => cur === label ? "" : label)} className={`shrink-0 text-sm transition ${selectedCountry === label ? "text-white" : "text-white/45 hover:text-white/80"}`}>{label}</button>
+                <button key={label} onClick={() => setSelectedCountry((cur) => cur === label ? "" : label)} className={`shrink-0 text-sm capitalize transition ${selectedCountry === label ? "text-white" : "text-white/45 hover:text-white/80"}`}>{label}</button>
               ))}
             </div>
             <div className="h-4 w-px shrink-0 bg-white/10" />
@@ -381,10 +519,11 @@ if (!uploadRes.ok) {
               <span className="shrink-0 text-[10px] uppercase tracking-[0.28em] text-white/30">Subject</span>
               <button onClick={() => setSelectedSubjects([])} className={`shrink-0 text-sm transition ${selectedSubjects.length === 0 ? "text-white" : "text-white/45 hover:text-white/80"}`}>All</button>
               {subjectOptions.map((label) => (
-                <button key={label} onClick={() => toggleSubject(label)} className={`shrink-0 text-sm transition ${selectedSubjects.includes(label) ? "text-white" : "text-white/45 hover:text-white/80"}`}>{label}</button>
+                <button key={label} onClick={() => toggleSubject(label)} className={`shrink-0 text-sm capitalize transition ${selectedSubjects.includes(label) ? "text-white" : "text-white/45 hover:text-white/80"}`}>{label}</button>
               ))}
             </div>
             <button onClick={toggleShuffle} className={`shrink-0 text-[10px] uppercase tracking-[0.24em] transition ${isShuffled ? "text-white" : "text-white/40 hover:text-white/80"}`}>Shuffle</button>
+            <button onClick={openSubscribe} className="shrink-0 text-[10px] uppercase tracking-[0.24em] text-white/40 transition hover:text-white/80">Subscribe</button>
             <button onClick={() => setShowContact(true)} className="shrink-0 text-[10px] uppercase tracking-[0.24em] text-white/40 transition hover:text-white/80">Contact</button>
             {(selectedCountry || selectedSubjects.length > 0) && (
               <button onClick={clearFilters} className="ml-auto shrink-0 text-[10px] uppercase tracking-[0.24em] text-white/40 transition hover:text-white/80">Clear</button>
@@ -396,6 +535,7 @@ if (!uploadRes.ok) {
               <h1 className="text-lg font-medium tracking-[0.24em] text-white">PIET</h1>
               <div className="flex items-center gap-3">
                 <button onClick={toggleShuffle} className={`text-[10px] uppercase tracking-[0.24em] ${isShuffled ? "text-white" : "text-white/40"}`}>Shuffle</button>
+                <button onClick={openSubscribe} className="text-[10px] uppercase tracking-[0.24em] text-white/40">Subscribe</button>
                 <button onClick={() => setShowContact(true)} className="text-[10px] uppercase tracking-[0.24em] text-white/40">Contact</button>
                 {(selectedCountry || selectedSubjects.length > 0) && (
                   <button onClick={clearFilters} className="text-[10px] uppercase tracking-[0.24em] text-white/40">Clear</button>
@@ -407,14 +547,14 @@ if (!uploadRes.ok) {
                 <span className="shrink-0 text-[10px] uppercase tracking-[0.28em] text-white/30">Country</span>
                 <button onClick={() => setSelectedCountry("")} className={`shrink-0 text-sm transition ${selectedCountry === "" ? "text-white" : "text-white/45 hover:text-white/80"}`}>All</button>
                 {countryOptions.map((label) => (
-                  <button key={label} onClick={() => setSelectedCountry((cur) => cur === label ? "" : label)} className={`shrink-0 text-sm transition ${selectedCountry === label ? "text-white" : "text-white/45 hover:text-white/80"}`}>{label}</button>
+                  <button key={label} onClick={() => setSelectedCountry((cur) => cur === label ? "" : label)} className={`shrink-0 text-sm capitalize transition ${selectedCountry === label ? "text-white" : "text-white/45 hover:text-white/80"}`}>{label}</button>
                 ))}
               </div>
               <div className="flex items-baseline gap-3 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                 <span className="shrink-0 text-[10px] uppercase tracking-[0.28em] text-white/30">Subject</span>
                 <button onClick={() => setSelectedSubjects([])} className={`shrink-0 text-sm transition ${selectedSubjects.length === 0 ? "text-white" : "text-white/45 hover:text-white/80"}`}>All</button>
                 {subjectOptions.map((label) => (
-                  <button key={label} onClick={() => toggleSubject(label)} className={`shrink-0 text-sm transition ${selectedSubjects.includes(label) ? "text-white" : "text-white/45 hover:text-white/80"}`}>{label}</button>
+                  <button key={label} onClick={() => toggleSubject(label)} className={`shrink-0 text-sm capitalize transition ${selectedSubjects.includes(label) ? "text-white" : "text-white/45 hover:text-white/80"}`}>{label}</button>
                 ))}
               </div>
             </div>
@@ -446,6 +586,7 @@ if (!uploadRes.ok) {
                   className={`relative flex aspect-[4/5] items-center justify-center overflow-hidden rounded-2xl border transition ${isDraggingFile ? "border-white/60 bg-white/10" : "border-white/10 bg-black/40"}`}
                 >
                   {previewUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
                     <img src={previewUrl} alt="Preview" className="h-full w-full object-cover" />
                   ) : (
                     <div className="px-6 text-center">
@@ -466,7 +607,7 @@ if (!uploadRes.ok) {
                 {allLabels.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
                     {allLabels.map((label) => (
-                      <button key={label} type="button" onClick={() => toggleUploadLabel(label)} className={selectedUploadLabels.includes(label) ? "rounded-full bg-white px-4 py-1.5 text-sm text-black" : "rounded-full border border-white/30 px-4 py-1.5 text-sm text-white"}>{label}</button>
+                      <button key={label} type="button" onClick={() => toggleUploadLabel(label)} className={selectedUploadLabels.includes(label) ? "rounded-full bg-white px-4 py-1.5 text-sm capitalize text-black" : "rounded-full border border-white/30 px-4 py-1.5 text-sm capitalize text-white"}>{label}</button>
                     ))}
                   </div>
                 ) : (
@@ -509,8 +650,16 @@ if (!uploadRes.ok) {
                 style={{ gridRow: `span ${rowSpan} / span ${rowSpan}`, transform: isShuffleAnimating ? `translateY(${((index % 5) - 2) * 10}px) scale(0.96)` : "translateY(0px) scale(1)", transitionDelay: isShuffleAnimating ? `${(index % 8) * 18}ms` : "0ms" }}>
                 <button type="button" onClick={() => { setActivePhoto(photo); closeEditPanel() }} className="block h-full w-full overflow-hidden bg-black text-left">
                   <div className="h-full w-full bg-black/80 p-[2px] sm:p-[3px]">
-                    <div className={`h-full w-full overflow-hidden ${roundingClass}`}>
-                      <img src={photo.image_url} alt={photo.title} className="h-full w-full object-cover" loading="lazy" />
+                    <div className={`relative h-full w-full overflow-hidden ${roundingClass}`}>
+                      <Image
+                        src={photo.image_url}
+                        alt={photo.title}
+                        fill
+                        sizes={GRID_SIZES}
+                        className="object-cover"
+                        priority={index < 4}
+                        loading={index < 4 ? undefined : "lazy"}
+                      />
                     </div>
                   </div>
                 </button>
@@ -523,40 +672,41 @@ if (!uploadRes.ok) {
       {activePhoto && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/92 p-4"
           onMouseMove={revealOverlayInfo}
-          onTouchStart={(e) => { if (isTouchDevice) touchStartXRef.current = e.touches[0]?.clientX ?? null }}
-          onTouchEnd={(e) => {
-            if (!isTouchDevice || editingPhotoId) return
-            const startX = touchStartXRef.current
-            const endX = e.changedTouches[0]?.clientX ?? null
-            if (startX === null || endX === null) return
-            const deltaX = endX - startX
-            if (Math.abs(deltaX) > 50) { if (deltaX < 0) showNextPhoto(); if (deltaX > 0) showPreviousPhoto() }
-            touchStartXRef.current = null
-          }}
           onClick={() => { closeEditPanel(); setActivePhoto(null) }}>
-          <div className="group relative flex max-h-[95vh] max-w-[92vw] items-center justify-center"
-            onClick={(e) => { e.stopPropagation(); if (isTouchDevice && !editingPhotoId) setShowOverlayInfo((cur) => !cur) }}>
-            <button type="button" onClick={() => { closeEditPanel(); setActivePhoto(null) }}
+          <div className="group relative inline-flex max-h-[95vh] max-w-[92vw] items-center justify-center"
+            onClick={(e) => {
+              e.stopPropagation()
+              // A finished swipe should not also count as a tap-toggle.
+              if (swipedRef.current) { swipedRef.current = false; return }
+              if (isTouchDevice && !editingPhotoId) setShowOverlayInfo((cur) => !cur)
+            }}
+            onTouchStart={(e) => { if (isTouchDevice) handleOverlayTouchStart(e) }}
+            onTouchEnd={(e) => { if (isTouchDevice) handleOverlayTouchEnd(e) }}
+          >
+            <button type="button" onClick={(e) => { e.stopPropagation(); closeEditPanel(); setActivePhoto(null) }}
               className={`absolute right-4 top-4 z-20 rounded-full border border-white/20 bg-black/35 px-3 py-1 text-sm text-white backdrop-blur-md transition hover:bg-black/55 ${showOverlayInfo || isTouchDevice || !!editingPhotoId ? "opacity-100" : "pointer-events-none opacity-0"}`}>
               Close
             </button>
             {filteredPhotos.length > 1 && !isTouchDevice && !editingPhotoId && (
               <>
                 <button type="button" onClick={(e) => { e.stopPropagation(); showPreviousPhoto() }} className="absolute left-0 top-0 z-20 hidden h-full w-36 items-center justify-start pl-4 text-white/90 group-hover:flex">
-                  <span className="rounded-full border border-white/20 bg-black/40 px-3 py-2 text-sm backdrop-blur-md">←</span>
+                  <span className="rounded-full border border-white/20 bg-black/40 px-3 py-2 text-sm backdrop-blur-md">&larr;</span>
                 </button>
                 <button type="button" onClick={(e) => { e.stopPropagation(); showNextPhoto() }} className="absolute right-0 top-0 z-20 hidden h-full w-36 items-center justify-end pr-4 text-white/90 group-hover:flex">
-                  <span className="rounded-full border border-white/20 bg-black/40 px-3 py-2 text-sm backdrop-blur-md">→</span>
+                  <span className="rounded-full border border-white/20 bg-black/40 px-3 py-2 text-sm backdrop-blur-md">&rarr;</span>
                 </button>
               </>
             )}
-            <img src={activePhoto.image_url} alt={activePhoto.title} className="max-h-[90vh] w-auto max-w-full rounded-[28px] object-contain shadow-2xl" />
+            {/* Full-resolution original here — quality is untouched for the opened photo. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={activePhoto.image_url} alt={activePhoto.title} className="max-h-[90vh] w-auto max-w-full select-none rounded-[28px] object-contain shadow-2xl" draggable={false} />
             <div className={`absolute inset-x-0 bottom-0 p-3 transition duration-300 sm:p-6 ${showOverlayInfo || !!editingPhotoId ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-3 opacity-0"}`}>
               <div className="mx-auto max-w-md rounded-[16px] border border-white/10 bg-black/30 p-2.5 shadow-2xl backdrop-blur-xl"
                 onClick={(e) => e.stopPropagation()}
                 onMouseEnter={() => { setShowOverlayInfo(true); if (overlayTimeoutRef.current) clearTimeout(overlayTimeoutRef.current) }}
                 onMouseLeave={hideOverlayInfoSoon}
-                onTouchStart={(e) => e.stopPropagation()}>
+                onTouchStart={(e) => e.stopPropagation()}
+                onTouchEnd={(e) => e.stopPropagation()}>
                 {isAdminMode && editingPhotoId === activePhoto.id ? (
                   <div className="space-y-4">
                     <div>
@@ -579,7 +729,7 @@ if (!uploadRes.ok) {
                               const current = editLabelInput.split(",").map((i) => i.trim().toLowerCase()).filter(Boolean)
                               setEditLabelInput(Array.from(new Set([...current, label])).join(", "))
                             }}
-                            className="rounded-full border border-white/20 bg-white/5 px-3 py-1.5 text-sm text-white transition hover:bg-white hover:text-black">
+                            className="rounded-full border border-white/20 bg-white/5 px-3 py-1.5 text-sm capitalize text-white transition hover:bg-white hover:text-black">
                             {label}
                           </button>
                         ))}
@@ -587,11 +737,13 @@ if (!uploadRes.ok) {
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {editLabelInput.split(",").map((l) => l.trim().toLowerCase()).filter(Boolean).map((label) => (
-                        <span key={label} className="rounded-full border border-white/20 bg-white/5 px-3 py-1.5 text-sm text-white">{label}</span>
+                        <span key={label} className="rounded-full border border-white/20 bg-white/5 px-3 py-1.5 text-sm capitalize text-white">{label}</span>
                       ))}
                     </div>
+                    <input ref={replaceInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => replaceActivePhoto(e.target.files?.[0] ?? null)} />
                     <div className="flex flex-wrap gap-2">
                       <button type="button" onClick={savePhotoEdits} disabled={isSavingEdit} className="rounded-full bg-white px-4 py-2 text-sm text-black disabled:opacity-50">{isSavingEdit ? "Saving..." : "Save changes"}</button>
+                      <button type="button" onClick={() => replaceInputRef.current?.click()} disabled={isReplacing} className="rounded-full border border-white/30 bg-white/5 px-4 py-2 text-sm text-white disabled:opacity-50">{isReplacing ? "Replacing..." : "Replace photo"}</button>
                       <button type="button" onClick={closeEditPanel} className="rounded-full border border-white/20 px-4 py-2 text-sm text-white">Cancel</button>
                       <button type="button" onClick={deleteActivePhoto} disabled={isDeletingPhoto} className="rounded-full border border-red-400/40 bg-red-500/10 px-4 py-2 text-sm text-red-200 disabled:opacity-50">{isDeletingPhoto ? "Deleting..." : "Delete photo"}</button>
                     </div>
@@ -609,11 +761,11 @@ if (!uploadRes.ok) {
                         <button key={label} type="button"
                           onClick={(e) => {
                             e.stopPropagation()
-                            if (COUNTRY_LABELS.includes(label as (typeof COUNTRY_LABELS)[number])) { setSelectedCountry(label); setSelectedSubjects([]) }
+                            if (isCountryLabel(label)) { setSelectedCountry(label); setSelectedSubjects([]) }
                             else { setSelectedCountry(""); setSelectedSubjects([label]) }
                             closeEditPanel(); setActivePhoto(null)
                           }}
-                          className="rounded-full border border-white/20 bg-white/5 px-2 py-0.5 text-[11px] text-white backdrop-blur-md transition hover:bg-white hover:text-black">
+                          className="rounded-full border border-white/20 bg-white/5 px-2 py-0.5 text-[11px] capitalize text-white backdrop-blur-md transition hover:bg-white hover:text-black">
                           {label}
                         </button>
                       ))}
@@ -642,6 +794,45 @@ if (!uploadRes.ok) {
                 <button type="button" onClick={submitContact} disabled={isSending} className="rounded-full bg-white px-5 py-2 text-black disabled:opacity-50">{isSending ? "Sending..." : "Send"}</button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showSubscribe && (
+        <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/85 p-4" onClick={() => setShowSubscribe(false)}>
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-black p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-medium text-white">Monthly photo digest</h2>
+                <p className="mt-1 text-sm text-white/55">Once a month, a short email with the new photos I've added. No spam.</p>
+              </div>
+              <button type="button" onClick={() => setShowSubscribe(false)} className="text-sm text-white/50 hover:text-white/80">Close</button>
+            </div>
+            {subscribeStatus === "success" ? (
+              <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-6 text-center text-sm text-white/80">
+                You&apos;re subscribed. See you in your inbox.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <input
+                  type="email"
+                  placeholder="your@email.com"
+                  value={subscribeEmail}
+                  onChange={(e) => { setSubscribeEmail(e.target.value); if (subscribeStatus === "error") setSubscribeStatus("idle") }}
+                  onKeyDown={(e) => { if (e.key === "Enter") submitSubscribe() }}
+                  className="w-full rounded-xl border border-white/20 bg-black px-3 py-2 text-white outline-none"
+                />
+                {subscribeStatus === "error" && (
+                  <p className="text-sm text-red-300">Please enter a valid email and try again.</p>
+                )}
+                <div className="flex items-center justify-between gap-3 pt-1">
+                  <button type="button" onClick={() => setShowSubscribe(false)} className="text-sm text-white/50 hover:text-white/80">Maybe later</button>
+                  <button type="button" onClick={submitSubscribe} disabled={subscribeStatus === "loading"} className="rounded-full bg-white px-5 py-2 text-black disabled:opacity-50">
+                    {subscribeStatus === "loading" ? "Subscribing..." : "Subscribe"}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
