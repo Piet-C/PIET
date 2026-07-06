@@ -5,8 +5,11 @@ const nextConfig = {
         protocol: "https",
         hostname: "*.supabase.co",
       },
+      {
+        protocol: "https",
+        hostname: "pub-08323d96cffd4fa995d320dd3deca113.r2.dev",
+      },
     ],
   },
 }
-
 export default nextConfig
