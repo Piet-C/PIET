@@ -3,7 +3,9 @@ import sql from "@/lib/db"
 import { makeThumbnail } from "@/lib/thumbnail"
 
 export const runtime = "nodejs"
-export const maxDuration = 60
+export const dynamic = "force-dynamic"
+export const revalidate = 0
+export const maxDuration = 300
 
 function keyFromUrl(url: string): string {
   const base = process.env.NEXT_PUBLIC_R2_PUBLIC_URL + "/"
@@ -15,25 +17,25 @@ export async function GET() {
     SELECT id, image_url FROM photos
     WHERE thumb_url IS NULL
     ORDER BY created_at DESC
-    LIMIT 1
   `) as { id: string; image_url: string }[]
 
-  if (rows.length === 0) return NextResponse.json({ message: "nothing to do" })
+  let processed = 0
+  let firstError = ""
 
-  const row = rows[0]
-  const key = keyFromUrl(row.image_url)
-
-  try {
-    const thumbUrl = await makeThumbnail(key)
-    await sql`UPDATE photos SET thumb_url = ${thumbUrl} WHERE id = ${row.id}`
-    return NextResponse.json({ ok: true, key, thumbUrl })
-  } catch (e) {
-    return NextResponse.json({
-      ok: false,
-      image_url: row.image_url,
-      key,
-      error: String(e),
-      message: (e as Error)?.message,
-    })
+  for (const row of rows) {
+    try {
+      const key = keyFromUrl(row.image_url)
+      const thumbUrl = await makeThumbnail(key)
+      await sql`UPDATE photos SET thumb_url = ${thumbUrl} WHERE id = ${row.id}`
+      processed++
+    } catch (e) {
+      if (!firstError) firstError = (e as Error)?.message || String(e)
+    }
   }
+
+  const remaining = (await sql`
+    SELECT COUNT(*)::int AS n FROM photos WHERE thumb_url IS NULL
+  `) as { n: number }[]
+
+  return NextResponse.json({ processed, remaining: remaining[0].n, firstError })
 }
