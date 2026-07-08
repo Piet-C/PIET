@@ -6,8 +6,6 @@ export async function makeThumbnail(key: string): Promise<string> {
   const original = await r2.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }))
   const bytes = await original.Body!.transformToByteArray()
 
-  // Force the data into a fresh, plain Node Buffer that sharp will accept,
-  // regardless of whether the source is an ArrayBuffer or SharedArrayBuffer.
   const inputBuffer = Buffer.alloc(bytes.byteLength)
   inputBuffer.set(bytes)
 
