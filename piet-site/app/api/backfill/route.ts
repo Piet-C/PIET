@@ -28,4 +28,12 @@ export async function GET() {
     await sql`UPDATE photos SET thumb_url = ${thumbUrl} WHERE id = ${row.id}`
     return NextResponse.json({ ok: true, key, thumbUrl })
   } catch (e) {
-    return
+    return NextResponse.json({
+      ok: false,
+      image_url: row.image_url,
+      key,
+      error: String(e),
+      message: (e as Error)?.message,
+    })
+  }
+}
