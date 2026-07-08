@@ -4,10 +4,14 @@ import { r2, BUCKET } from "@/lib/r2"
 
 export async function makeThumbnail(key: string): Promise<string> {
   const original = await r2.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }))
-  const bytes = await original.Body!.transformToByteArray()
 
-  const inputBuffer = Buffer.alloc(bytes.byteLength)
-  inputBuffer.set(bytes)
+  // Read the object as a Node stream and collect it into a clean Buffer.
+  const stream = original.Body as unknown as AsyncIterable<Uint8Array>
+  const chunks: Buffer[] = []
+  for await (const chunk of stream) {
+    chunks.push(Buffer.from(chunk))
+  }
+  const inputBuffer = Buffer.concat(chunks)
 
   const thumb = await sharp(inputBuffer)
     .rotate()
